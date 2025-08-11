@@ -8,18 +8,18 @@ import (
 	"encoding/json"
 
 	userlib "github.com/cs161-staff/project2-userlib"
-
 	"github.com/google/uuid"
 
 	// hex.EncodeToString(...) is useful for converting []byte to string
 
+
+	"fmt"
 
 	// Useful for creating new error messages to return using errors.New("...")
 	"errors"
 
 	// Optional.
 	_ "strconv"
-
 )
 
 // This serves two purposes: it shows you a few useful primitives,
@@ -45,7 +45,7 @@ func someUsefulThings() {
 	}
 	userlib.DebugMsg("Deterministic UUID: %v", deterministicUUID.String())
 
-	// Declares a Course struct type, creates an instance of it, and prints it.
+	// Declares a Course struct type, creates an instance of it, and marshals it into JSON.
 	type Course struct {
 		name      string
 		professor []byte
@@ -57,759 +57,827 @@ func someUsefulThings() {
 		panic(err)
 	}
 
-	userlib.DebugMsg("Course: %v", course)
-	userlib.DebugMsg("Course Bytes: %v", courseBytes)
+	userlib.DebugMsg("Struct: %v", course)
+	userlib.DebugMsg("JSON Data: %v", courseBytes)
 
-	publicKey, privateKey, err := userlib.PKEKeyGen()
+	var pk userlib.PKEEncKey
+	var sk userlib.PKEDecKey
+	pk, sk, _ = userlib.PKEKeyGen()
+	userlib.DebugMsg("PKE Key Pair: (%v, %v)", pk, sk)
+
+	originalKey := userlib.RandomBytes(16)
+	derivedKey, err := userlib.HashKDF(originalKey, []byte("mac-key"))
 	if err != nil {
 		panic(err)
 	}
+	userlib.DebugMsg("Original Key: %v", originalKey)
+	userlib.DebugMsg("Derived Key: %v", derivedKey)
 
-	encryptedCourse, err := userlib.PKEEnc(publicKey, courseBytes)
-	if err != nil {
-		panic(err)
-	}
+	//
 
-	userlib.DebugMsg("Encrypted Course: %v", encryptedCourse)
-
-	decryptedCourse, err := userlib.PKEDec(privateKey, encryptedCourse)
-	if err != nil {
-		panic(err)
-	}
-
-	userlib.DebugMsg("Decrypted Course: %v", decryptedCourse)
-
-	var courseFromJSON Course
-	err = json.Unmarshal(decryptedCourse, &courseFromJSON)
-	if err != nil {
-		panic(err)
-	}
-
-	userlib.DebugMsg("Course From JSON: %v", courseFromJSON)
-}
-
-type UserData struct {
-	Username    string                 `json:"username"`
-	RootKey     []byte                 `json:"root_key"`
-	FileMap     map[string]uuid.UUID   `json:"file_map"`
-	PublicKey   userlib.PKEEncKey      `json:"public_key"`
-	PrivateKey  userlib.PKEDecKey      `json:"private_key"`
-	SignKey     userlib.DSSignKey      `json:"sign_key"`
-	VerifyKey   userlib.DSVerifyKey    `json:"verify_key"`
-}
-
-type FileMetadata struct {
-	FileUUID    uuid.UUID `json:"file_uuid"`
-	EncKey      []byte    `json:"enc_key"`
-	MacKey      []byte    `json:"mac_key"`
-	Owner       string    `json:"owner"`
-	AppendHead  uuid.UUID `json:"append_head"`
-}
-
-type FileData struct {
-	Content []byte `json:"content"`
-	HMAC    []byte `json:"hmac"`
-}
-
-type AppendNode struct {
-	Content []byte    `json:"content"`
-	Next    uuid.UUID `json:"next"`
-	HMAC    []byte    `json:"hmac"`
-}
-
-type Invitation struct {
-	FileMetadataUUID uuid.UUID `json:"file_metadata_uuid"`
-	EncKey           []byte    `json:"enc_key"`
-	MacKey           []byte    `json:"mac_key"`
-	Signature        []byte    `json:"signature"`
+	_ = fmt.Sprintf("%s_%d", "file", 1)
 }
 
 type User struct {
 	Username string
-	RootKey  []byte
+	MasterKey []byte
+	RSAPrivateKey userlib.PKEDecKey
+	DigitalSigningKey userlib.DSSignKey
 }
 
+type FileInfo struct {
+	Owner bool
+	FileHeaderUUID uuid.UUID
+	AccessPointUUID uuid.UUID
+	EncKey []byte
+	MACKey []byte
+	OwnerAccessInfoMapUUID uuid.UUID
+}
+
+type FileHeader struct {
+	FirstUUID uuid.UUID
+	NewUUID uuid.UUID
+}
+
+type File struct {
+	Content []byte
+	NextUUID uuid.UUID
+}
+
+type Invitation struct {
+	AccessPointUUID uuid.UUID
+	APEncKey []byte
+	APMACKey []byte
+}
+
+type AccessPoint struct {
+	EncKey []byte
+	MACKey []byte
+	FileHeaderUUID uuid.UUID
+	Revoked bool
+}
+
+type OwnerAccessInfoMap struct {
+	InfoMap map[string]OwnerAccessInfo
+}
+
+type OwnerAccessInfo struct {
+	AccessPointUUID uuid.UUID
+	APEncKey []byte
+	APMACKey []byte
+}
+
+
 func InitUser(username string, password string) (userdataptr *User, err error) {
-	if len(username) == 0 {
-		return nil, errors.New("username cannot be empty")
-	}
+	var userdata User
 
-	userUUID, err := uuid.FromBytes(userlib.Hash([]byte(username))[:16])
+
+
+	if (username == "") {
+		return nil, errors.New("empty username")
+	}
+	userdata.Username = username
+
+	LoginUUID, err := uuid.FromBytes(userlib.Hash([]byte(username))[:16])
 	if err != nil {
 		return nil, err
 	}
 
-	_, exists := userlib.DatastoreGet(userUUID)
-	if exists {
-		return nil, errors.New("user already exists")
+	_, ok := userlib.DatastoreGet(LoginUUID)
+	
+	if ok {
+		return nil, errors.New("error user already exists")
 	}
 
-	salt := userlib.RandomBytes(16)
-	rootKey := userlib.Argon2Key([]byte(password), salt, 16)
-
-	publicKey, privateKey, err := userlib.PKEKeyGen()
+	IV := userlib.RandomBytes(16)
+	MasterKey := userlib.Argon2Key([]byte(password), IV, 16)
+	UserKey, err := userlib.HashKDF(MasterKey, []byte("UserKey"))
 	if err != nil {
 		return nil, err
 	}
 
-	signKey, verifyKey, err := userlib.DSKeyGen()
+	userdata.MasterKey = MasterKey
+
+	pub, priv, err := userlib.PKEKeyGen()
+	if err != nil {
+		return nil, err
+	}
+	userdata.RSAPrivateKey = priv
+	userlib.KeystoreSet(username + "RSA", pub)
+
+	sign, verify, err := userlib.DSKeyGen()
+	if err != nil {
+		return nil, err
+	}
+	userdata.DigitalSigningKey = sign
+	userlib.KeystoreSet(username + "DigSig", verify)
+
+	userBytes, err := json.Marshal(userdata)
+	if err != nil {
+		return nil, err
+	}
+	
+	ciphertext := userlib.SymEnc(UserKey[:16], IV, userBytes)
+	mac, err := userlib.HMACEval(UserKey[16:32], ciphertext)
 	if err != nil {
 		return nil, err
 	}
 
-	err = userlib.KeystoreSet(username+"_public", publicKey)
-	if err != nil {
-		return nil, err
-	}
+	partial := append(ciphertext, mac...)
+	final := append(partial, IV...)
 
-	err = userlib.KeystoreSet(username+"_verify", verifyKey)
-	if err != nil {
-		return nil, err
-	}
+	userlib.DatastoreSet(LoginUUID, final)
 
-	userData := UserData{
-		Username:    username,
-		RootKey:     rootKey,
-		FileMap:     make(map[string]uuid.UUID),
-		PublicKey:   publicKey,
-		PrivateKey:  privateKey,
-		SignKey:     signKey,
-		VerifyKey:   verifyKey,
-	}
-
-	userDataBytes, err := json.Marshal(userData)
-	if err != nil {
-		return nil, err
-	}
-
-	encKey, err := userlib.HashKDF(rootKey, []byte("user_enc"))
-	if err != nil {
-		return nil, err
-	}
-	encKey = encKey[:16]
-
-	macKey, err := userlib.HashKDF(rootKey, []byte("user_mac"))
-	if err != nil {
-		return nil, err
-	}
-	macKey = macKey[:16]
-
-	iv := userlib.RandomBytes(16)
-	encryptedData := userlib.SymEnc(encKey, iv, userDataBytes)
-
-	hmac, err := userlib.HMACEval(macKey, encryptedData)
-	if err != nil {
-		return nil, err
-	}
-
-	storedData := append(encryptedData, hmac...)
-	storedData = append(salt, storedData...)
-
-	userlib.DatastoreSet(userUUID, storedData)
-
-	user := &User{
-		Username: username,
-		RootKey:  rootKey,
-	}
-
-	return user, nil
+	return &userdata, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
-	if len(username) == 0 {
-		return nil, errors.New("username cannot be empty")
-	}
 
-	userUUID, err := uuid.FromBytes(userlib.Hash([]byte(username))[:16])
+
+	LoginUUID, err := uuid.FromBytes(userlib.Hash([]byte(username))[:16])
 	if err != nil {
 		return nil, err
 	}
 
-	storedData, exists := userlib.DatastoreGet(userUUID)
-	if !exists {
-		return nil, errors.New("user does not exist")
-	}
-
-	if len(storedData) < 16 {
-		return nil, errors.New("invalid user data")
-	}
-
-	salt := storedData[:16]
-	encryptedData := storedData[16 : len(storedData)-64]
-	storedHMAC := storedData[len(storedData)-64:]
-
-	rootKey := userlib.Argon2Key([]byte(password), salt, 16)
-
-	macKey, err := userlib.HashKDF(rootKey, []byte("user_mac"))
-	if err != nil {
-		return nil, err
-	}
-	macKey = macKey[:16]
-
-	computedHMAC, err := userlib.HMACEval(macKey, encryptedData)
-	if err != nil {
-		return nil, err
-	}
-
-	if !userlib.HMACEqual(storedHMAC, computedHMAC) {
-		return nil, errors.New("invalid password or data tampering detected")
-	}
-
-	encKey, err := userlib.HashKDF(rootKey, []byte("user_enc"))
-	if err != nil {
-		return nil, err
-	}
-	encKey = encKey[:16]
-
-	userDataBytes := userlib.SymDec(encKey, encryptedData)
-
-	var userData UserData
-	err = json.Unmarshal(userDataBytes, &userData)
-	if err != nil {
-		return nil, err
-	}
-
-	user := &User{
-		Username: username,
-		RootKey:  rootKey,
-	}
-
-	return user, nil
-}
-
-func (userdata *User) getUserData() (UserData, error) {
-	userUUID, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username))[:16])
-	if err != nil {
-		return UserData{}, err
-	}
-
-	storedData, exists := userlib.DatastoreGet(userUUID)
-	if !exists {
-		return UserData{}, errors.New("user data not found")
-	}
-
-	if len(storedData) < 16 {
-		return UserData{}, errors.New("invalid user data")
-	}
-
-	_ = storedData[:16]
-	encryptedData := storedData[16 : len(storedData)-64]
-	storedHMAC := storedData[len(storedData)-64:]
-
-	macKey, err := userlib.HashKDF(userdata.RootKey, []byte("user_mac"))
-	if err != nil {
-		return UserData{}, err
-	}
-	macKey = macKey[:16]
-
-	computedHMAC, err := userlib.HMACEval(macKey, encryptedData)
-	if err != nil {
-		return UserData{}, err
-	}
-
-	if !userlib.HMACEqual(storedHMAC, computedHMAC) {
-		return UserData{}, errors.New("user data integrity check failed")
-	}
-
-	encKey, err := userlib.HashKDF(userdata.RootKey, []byte("user_enc"))
-	if err != nil {
-		return UserData{}, err
-	}
-	encKey = encKey[:16]
-
-	userDataBytes := userlib.SymDec(encKey, encryptedData)
-
-	var userData UserData
-	err = json.Unmarshal(userDataBytes, &userData)
-	if err != nil {
-		return UserData{}, err
-	}
-
-	return userData, nil
-}
-
-func (userdata *User) saveUserData(userData UserData) error {
-	userUUID, err := uuid.FromBytes(userlib.Hash([]byte(userdata.Username))[:16])
-	if err != nil {
-		return err
-	}
-
-	userDataBytes, err := json.Marshal(userData)
-	if err != nil {
-		return err
-	}
-
-	encKey, err := userlib.HashKDF(userdata.RootKey, []byte("user_enc"))
-	if err != nil {
-		return err
-	}
-	encKey = encKey[:16]
-
-	macKey, err := userlib.HashKDF(userdata.RootKey, []byte("user_mac"))
-	if err != nil {
-		return err
-	}
-	macKey = macKey[:16]
-
-	salt := userlib.RandomBytes(16)
-	iv := userlib.RandomBytes(16)
-	encryptedData := userlib.SymEnc(encKey, iv, userDataBytes)
-
-	hmac, err := userlib.HMACEval(macKey, encryptedData)
-	if err != nil {
-		return err
-	}
-
-	storedData := append(encryptedData, hmac...)
-	storedData = append(salt, storedData...)
-
-	userlib.DatastoreSet(userUUID, storedData)
-	return nil
-}
-
-func (userdata *User) getFileMetadata(filename string) (FileMetadata, error) {
-	userData, err := userdata.getUserData()
-	if err != nil {
-		return FileMetadata{}, err
-	}
-
-	metadataUUID, exists := userData.FileMap[filename]
-	if !exists {
-		return FileMetadata{}, errors.New("file not found")
-	}
-
-	metadataBytes, exists := userlib.DatastoreGet(metadataUUID)
-	if !exists {
-		return FileMetadata{}, errors.New("file metadata not found")
-	}
-
-	var metadata FileMetadata
-	err = json.Unmarshal(metadataBytes, &metadata)
-	if err != nil {
-		return FileMetadata{}, err
-	}
-
-	return metadata, nil
-}
-
-func (userdata *User) saveFileMetadata(metadataUUID uuid.UUID, metadata FileMetadata) error {
-	metadataBytes, err := json.Marshal(metadata)
-	if err != nil {
-		return err
-	}
-
-	userlib.DatastoreSet(metadataUUID, metadataBytes)
-	return nil
-}
-
-func (userdata *User) loadAppendData(appendUUID uuid.UUID, encKey []byte, macKey []byte) ([]byte, error) {
-	return nil, errors.New("not implemented")
-}
-
-func (userdata *User) loadAppendDataWithKeys(appendUUID uuid.UUID, encKey []byte, macKey []byte) ([]byte, error) {
-	var allContent []byte
-	currentUUID := appendUUID
-
-	for currentUUID != uuid.Nil {
-		nodeBytes, exists := userlib.DatastoreGet(currentUUID)
-		if !exists {
-			break
-		}
-
-		if len(nodeBytes) < 64 {
-			return nil, errors.New("invalid append node data")
-		}
-
-		encryptedData := nodeBytes[:len(nodeBytes)-64]
-		storedHMAC := nodeBytes[len(nodeBytes)-64:]
-
-		computedHMAC, err := userlib.HMACEval(macKey, encryptedData)
-		if err != nil {
-			return nil, err
-		}
-
-		if !userlib.HMACEqual(storedHMAC, computedHMAC) {
-			return nil, errors.New("append node integrity check failed")
-		}
-
-		nodeDataBytes := userlib.SymDec(encKey, encryptedData)
-
-		var node AppendNode
-		err = json.Unmarshal(nodeDataBytes, &node)
-		if err != nil {
-			return nil, err
-		}
-
-		allContent = append(allContent, node.Content...)
-		currentUUID = node.Next
-	}
-
-	return allContent, nil
-}
-
-func (userdata *User) deleteAppendChain(appendUUID uuid.UUID) error {
-	currentUUID := appendUUID
-
-	for currentUUID != uuid.Nil {
-		nodeBytes, exists := userlib.DatastoreGet(currentUUID)
-		if !exists {
-			break
-		}
-
-		userlib.DatastoreDelete(currentUUID)
-
-		if len(nodeBytes) >= 64 {
-			encryptedData := nodeBytes[:len(nodeBytes)-64]
-			var node AppendNode
-			json.Unmarshal(encryptedData, &node)
-			currentUUID = node.Next
-		} else {
-			break
-		}
-	}
-
-	return nil
-}
-
-func (userdata *User) updateInvitationForUser(recipientUsername string, metadataUUID uuid.UUID, encKey []byte, macKey []byte) (uuid.UUID, error) {
-	recipientPublicKey, ok := userlib.KeystoreGet(recipientUsername + "_public")
+	data, ok := userlib.DatastoreGet(LoginUUID)
 	if !ok {
-		return uuid.Nil, errors.New("recipient public key not found")
+		return nil, errors.New("GetUser: error getting Data")
 	}
 
-	invitation := Invitation{
-		FileMetadataUUID: metadataUUID,
-		EncKey:           encKey,
-		MacKey:           macKey,
+	if len(data) < 80 {
+		return nil, errors.New("GetUser: data not long enough")
 	}
 
-	invitationBytes, err := json.Marshal(invitation)
+	IV := data[len(data)-16:]
+	ciphertext := data[:len(data)-80]
+
+	MasterKey := userlib.Argon2Key([]byte(password), IV, 16)
+	UserKey, err := userlib.HashKDF(MasterKey, []byte("UserKey"))
+
+	mac, err := userlib.HMACEval(UserKey[16:32], ciphertext)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 
-	userData, err := userdata.getUserData()
+	if !userlib.HMACEqual(mac, data[len(data)-80:len(data)-16]) {
+		return nil, errors.New("GetUser: HMAC not matching")
+	}
+
+	marshaleduser := userlib.SymDec(UserKey[:16], ciphertext)
+	var userdata User
+	err = json.Unmarshal(marshaleduser, &userdata)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 
-	signature, err := userlib.DSSign(userData.SignKey, invitationBytes)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 
-	invitation.Signature = signature
-
-	finalInvitationBytes, err := json.Marshal(invitation)
-	if err != nil {
-		return uuid.Nil, err
-	}
-
-	encryptedInvitation, err := userlib.PKEEnc(recipientPublicKey, finalInvitationBytes)
-	if err != nil {
-		return uuid.Nil, err
-	}
-
-	invitationUUID := uuid.New()
-	userlib.DatastoreSet(invitationUUID, encryptedInvitation)
-
-	return invitationUUID, nil
+	return &userdata, nil
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
-	userData, err := userdata.getUserData()
+
+	
+	FileHeaderUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
 	if err != nil {
 		return err
 	}
 
-	fileEncKey, err := userlib.HashKDF(userdata.RootKey, []byte("file_enc_"+filename))
-	if err != nil {
-		return err
-	}
-	fileEncKey = fileEncKey[:16]
+	FileNameKey, _ := userlib.HashKDF(userdata.MasterKey, []byte(filename))
 
-	fileMacKey, err := userlib.HashKDF(userdata.RootKey, []byte("file_mac_"+filename))
-	if err != nil {
-		return err
-	}
-	fileMacKey = fileMacKey[:16]
+	UserKey, err := userlib.HashKDF(userdata.MasterKey, []byte("UserKey"))
 
-	fileUUID := uuid.New()
-
-	fileData := FileData{
-		Content: content,
-	}
-
-	fileDataBytes, err := json.Marshal(fileData)
+	FileInfoUUID, err := uuid.FromBytes(FileNameKey[:16])
 	if err != nil {
 		return err
 	}
 
-	iv := userlib.RandomBytes(16)
-	encryptedFileData := userlib.SymEnc(fileEncKey, iv, fileDataBytes)
+	_, ok := userlib.DatastoreGet(FileInfoUUID)
 
-	hmac, err := userlib.HMACEval(fileMacKey, encryptedFileData)
+	if ok {
+		var fileinfo FileInfo
+		err = getCiphAndCheckMAC(FileInfoUUID, UserKey[:16], UserKey[16:32], &fileinfo)
+		if err != nil {
+			return err
+		}
+
+
+		var fileheaderuuid uuid.UUID
+		var fileenckey []byte
+		var filemackey []byte
+		
+		if fileinfo.Owner {
+			fileheaderuuid = fileinfo.FileHeaderUUID
+			fileenckey = fileinfo.EncKey
+			filemackey = fileinfo.MACKey
+		} else {
+			var ap AccessPoint
+			err = getCiphAndCheckMAC(fileinfo.AccessPointUUID, fileinfo.EncKey, fileinfo.MACKey, &ap)
+			if err != nil {
+				return err
+			}
+			if ap.Revoked {
+				return errors.New("access revoked")
+			}
+			fileheaderuuid = ap.FileHeaderUUID
+			fileenckey = ap.EncKey
+			filemackey = ap.MACKey
+		}
+
+		var fileheader FileHeader
+		err = getCiphAndCheckMAC(fileheaderuuid, fileenckey, filemackey, &fileheader)
+		if err != nil {
+			return err
+		}
+
+		FirstUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
+		if err != nil {
+			return err
+		}
+		NewUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
+		if err != nil {
+			return err
+		}
+
+		fileheader.FirstUUID = FirstUUID
+		fileheader.NewUUID = NewUUID
+
+		var file File
+		file.Content = content
+		file.NextUUID = NewUUID
+
+
+		err = setFinalCiph(FirstUUID, fileenckey, filemackey, file)
+		if err != nil {
+			return err
+		}
+
+
+		err = setFinalCiph(fileheaderuuid, fileenckey, filemackey, fileheader)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	var fileinfo FileInfo
+	fileinfo.Owner = true
+	fileinfo.FileHeaderUUID = FileHeaderUUID
+	fileinfo.EncKey = userlib.RandomBytes(16)
+	fileinfo.MACKey = userlib.RandomBytes(16)
+	fileinfo.OwnerAccessInfoMapUUID, _ = uuid.FromBytes(userlib.RandomBytes(16))
+
+	
+	FirstUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
+	if err != nil {
+		return err
+	}
+	NewUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
 	if err != nil {
 		return err
 	}
 
-	finalFileData := append(encryptedFileData, hmac...)
-	userlib.DatastoreSet(fileUUID, finalFileData)
+	var fileheader FileHeader
+	fileheader.FirstUUID = FirstUUID
+	fileheader.NewUUID = NewUUID
 
-	metadata := FileMetadata{
-		FileUUID:   fileUUID,
-		EncKey:     fileEncKey,
-		MacKey:     fileMacKey,
-		Owner:      userdata.Username,
-		AppendHead: uuid.Nil,
-	}
+	var file File
+	file.Content = content
+	file.NextUUID = NewUUID
 
-	metadataUUID := uuid.New()
-	err = userdata.saveFileMetadata(metadataUUID, metadata)
+
+	err = setFinalCiph(FirstUUID, fileinfo.EncKey, fileinfo.MACKey, file)
 	if err != nil {
 		return err
 	}
 
-	userData.FileMap[filename] = metadataUUID
-	return userdata.saveUserData(userData)
+
+	err = setFinalCiph(FileHeaderUUID, fileinfo.EncKey, fileinfo.MACKey, fileheader)
+	if err != nil {
+		return err
+	}
+
+	err = setFinalCiph(FileInfoUUID, UserKey[:16], UserKey[16:32], fileinfo)
+	if err != nil {
+		return err
+	}
+
+	var accmap OwnerAccessInfoMap
+	accmap.InfoMap = make(map[string]OwnerAccessInfo)
+	err = setFinalCiph(fileinfo.OwnerAccessInfoMapUUID, UserKey[:16], UserKey[16:32], accmap)
+	if err != nil {
+		return err
+	}
+
+	return
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
-	metadata, err := userdata.getFileMetadata(filename)
+
+	FileNameKey, _ := userlib.HashKDF(userdata.MasterKey, []byte(filename))
+	UserKey, err := userlib.HashKDF(userdata.MasterKey, []byte("UserKey"))
+
+	FileInfoUUID, err := uuid.FromBytes(FileNameKey[:16])
 	if err != nil {
 		return err
 	}
 
-	appendUUID := uuid.New()
-
-	appendNode := AppendNode{
-		Content: content,
-		Next:    metadata.AppendHead,
-	}
-
-	appendNodeBytes, err := json.Marshal(appendNode)
+	var fileinfo FileInfo
+	err = getCiphAndCheckMAC(FileInfoUUID, UserKey[:16], UserKey[16:32], &fileinfo)
 	if err != nil {
 		return err
 	}
 
-	iv := userlib.RandomBytes(16)
-	encryptedAppendData := userlib.SymEnc(metadata.EncKey, iv, appendNodeBytes)
 
-	hmac, err := userlib.HMACEval(metadata.MacKey, encryptedAppendData)
+	var fileheaderuuid uuid.UUID
+	var fileenckey []byte
+	var filemackey []byte
+
+
+	if fileinfo.Owner {
+		fileheaderuuid = fileinfo.FileHeaderUUID
+		fileenckey = fileinfo.EncKey
+		filemackey = fileinfo.MACKey
+	} else {
+		var ap AccessPoint
+		err = getCiphAndCheckMAC(fileinfo.AccessPointUUID, fileinfo.EncKey, fileinfo.MACKey, &ap)
+		if err != nil {
+			return err
+		}
+		if ap.Revoked {
+			return errors.New("access revoked")
+		}
+		fileheaderuuid = ap.FileHeaderUUID
+		fileenckey = ap.EncKey
+		filemackey = ap.MACKey
+	}
+
+	var fileheader FileHeader
+	err = getCiphAndCheckMAC(fileheaderuuid, fileenckey, filemackey, &fileheader)
+	if err != nil {
+		return err
+	}
+	
+	nextuuid, err := uuid.FromBytes(userlib.RandomBytes(16))
 	if err != nil {
 		return err
 	}
 
-	finalAppendData := append(encryptedAppendData, hmac...)
-	userlib.DatastoreSet(appendUUID, finalAppendData)
+	var file File
+	file.Content = content
+	file.NextUUID = nextuuid
 
-	metadata.AppendHead = appendUUID
-
-	userData, err := userdata.getUserData()
+	err = setFinalCiph(fileheader.NewUUID, fileenckey, filemackey, file)
 	if err != nil {
 		return err
 	}
 
-	metadataUUID := userData.FileMap[filename]
-	return userdata.saveFileMetadata(metadataUUID, metadata)
+	fileheader.NewUUID = nextuuid
+	err = setFinalCiph(fileheaderuuid, fileenckey, filemackey, fileheader)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
-	metadata, err := userdata.getFileMetadata(filename)
+
+	FileNameKey, _ := userlib.HashKDF(userdata.MasterKey, []byte(filename))
+	UserKey, err := userlib.HashKDF(userdata.MasterKey, []byte("UserKey"))
+
+	FileInfoUUID, err := uuid.FromBytes(FileNameKey[:16])
 	if err != nil {
 		return nil, err
 	}
 
-	fileBytes, exists := userlib.DatastoreGet(metadata.FileUUID)
-	if !exists {
-		return nil, errors.New("file data not found")
-	}
-
-	if len(fileBytes) < 64 {
-		return nil, errors.New("invalid file data")
-	}
-
-	encryptedData := fileBytes[:len(fileBytes)-64]
-	storedHMAC := fileBytes[len(fileBytes)-64:]
-
-	computedHMAC, err := userlib.HMACEval(metadata.MacKey, encryptedData)
+	var fileinfo FileInfo
+	err = getCiphAndCheckMAC(FileInfoUUID, UserKey[:16], UserKey[16:32], &fileinfo)
 	if err != nil {
 		return nil, err
 	}
 
-	if !userlib.HMACEqual(storedHMAC, computedHMAC) {
-		return nil, errors.New("file integrity check failed")
+	var fileheaderuuid uuid.UUID
+	var fileenckey []byte
+	var filemackey []byte
+
+
+	if fileinfo.Owner {
+		fileheaderuuid = fileinfo.FileHeaderUUID
+		fileenckey = fileinfo.EncKey
+		filemackey = fileinfo.MACKey
+		
+	} else {
+		var ap AccessPoint
+		err = getCiphAndCheckMAC(fileinfo.AccessPointUUID, fileinfo.EncKey, fileinfo.MACKey, &ap)
+		if err != nil {
+			return nil, err
+		}
+		if ap.Revoked {
+			return nil, errors.New("access revoked")
+		}
+		fileheaderuuid = ap.FileHeaderUUID
+		fileenckey = ap.EncKey
+		filemackey = ap.MACKey
 	}
 
-	fileDataBytes := userlib.SymDec(metadata.EncKey, encryptedData)
-
-	var fileData FileData
-	err = json.Unmarshal(fileDataBytes, &fileData)
+	var fileheader FileHeader
+	err = getCiphAndCheckMAC(fileheaderuuid, fileenckey, filemackey, &fileheader)
 	if err != nil {
 		return nil, err
 	}
 
-	content = fileData.Content
 
-	// if metadata.AppendHead != uuid.Nil {
-	//	appendContent, err := userdata.loadAppendDataWithKeys(metadata.AppendHead, metadata.EncKey, metadata.MacKey)
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//	content = append(content, appendContent...)
-	// }
+	nextuuid := fileheader.FirstUUID
+
+
+	for nextuuid != fileheader.NewUUID {
+		var file File
+		err = getCiphAndCheckMAC(nextuuid, fileenckey, filemackey, &file)
+		if err != nil {
+			return nil, err
+		}
+		content = append(content, file.Content...)
+		nextuuid = file.NextUUID
+	}
+
 
 	return content, nil
 }
 
-func (userdata *User) CreateInvitation(filename string, recipientUsername string) (invitationPtr uuid.UUID, err error) {
-	if recipientUsername == userdata.Username {
-		return uuid.Nil, errors.New("cannot invite yourself")
-	}
+func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
+	invitationPtr uuid.UUID, err error) {
 
-	_, ok := userlib.KeystoreGet(recipientUsername + "_public")
-	if !ok {
-		return uuid.Nil, errors.New("recipient user does not exist")
-	}
+	FileNameKey, _ := userlib.HashKDF(userdata.MasterKey, []byte(filename))
+	UserKey, err := userlib.HashKDF(userdata.MasterKey, []byte("UserKey"))
 
-	userData, err := userdata.getUserData()
+	FileInfoUUID, err := uuid.FromBytes(FileNameKey[:16])
 	if err != nil {
 		return uuid.Nil, err
 	}
 
-	metadataUUID, exists := userData.FileMap[filename]
-	if !exists {
-		return uuid.Nil, errors.New("file not found")
-	}
-
-	metadata, err := userdata.getFileMetadata(filename)
+	var fileinfo FileInfo
+	err = getCiphAndCheckMAC(FileInfoUUID, UserKey[:16], UserKey[16:32], &fileinfo)
 	if err != nil {
 		return uuid.Nil, err
 	}
 
-	return userdata.updateInvitationForUser(recipientUsername, metadataUUID, metadata.EncKey, metadata.MacKey)
+	if fileinfo.Owner {
+
+		invitationuuid, err := uuid.FromBytes(userlib.RandomBytes(16))
+		if err != nil {
+			return uuid.Nil, err
+		}
+		accesspointuuid, err := uuid.FromBytes(userlib.RandomBytes(16))
+		if err != nil {
+			return uuid.Nil, err
+		}
+		apenckey := userlib.RandomBytes(16)
+		apmackey := userlib.RandomBytes(16)
+
+		var inv Invitation
+		inv.AccessPointUUID = accesspointuuid
+		inv.APEncKey = apenckey
+		inv.APMACKey = apmackey
+
+		err = setFinalCiphRSA(invitationuuid, recipientUsername, userdata.DigitalSigningKey, inv)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		var ap AccessPoint
+		ap.FileHeaderUUID = fileinfo.FileHeaderUUID
+		ap.EncKey = fileinfo.EncKey
+		ap.MACKey = fileinfo.MACKey
+
+		err = setFinalCiph(accesspointuuid, apenckey, apmackey, ap)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		var accmap OwnerAccessInfoMap
+		err = getCiphAndCheckMAC(fileinfo.OwnerAccessInfoMapUUID, UserKey[:16], UserKey[16:32], &accmap)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		var info OwnerAccessInfo
+		info.AccessPointUUID = accesspointuuid
+		info.APEncKey = apenckey
+		info.APMACKey = apmackey
+		accmap.InfoMap[recipientUsername] = info
+		err = setFinalCiph(fileinfo.OwnerAccessInfoMapUUID, UserKey[:16], UserKey[16:32], accmap)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		return invitationuuid, nil
+
+
+	} else {
+
+		invitationuuid, err := uuid.FromBytes(userlib.RandomBytes(16))
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		var inv Invitation
+		inv.AccessPointUUID = fileinfo.AccessPointUUID
+		inv.APEncKey = fileinfo.EncKey
+		inv.APMACKey = fileinfo.MACKey
+
+		err = setFinalCiphRSA(invitationuuid, recipientUsername, userdata.DigitalSigningKey, inv)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		return invitationuuid, nil
+	}
+
+	 
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
-	userData, err := userdata.getUserData()
+
+	var inv Invitation
+	err := getCiphAndCheckMACRSA(invitationPtr, senderUsername, userdata.RSAPrivateKey, &inv)
 	if err != nil {
 		return err
 	}
 
-	_, exists := userData.FileMap[filename]
-	if exists {
-		return errors.New("filename already exists")
-	}
-
-	encryptedInvitation, exists := userlib.DatastoreGet(invitationPtr)
-	if !exists {
-		return errors.New("invitation not found")
-	}
-
-	invitationBytes, err := userlib.PKEDec(userData.PrivateKey, encryptedInvitation)
+	var ap AccessPoint
+	err = getCiphAndCheckMAC(inv.AccessPointUUID, inv.APEncKey, inv.APMACKey, &ap)
 	if err != nil {
-		return errors.New("failed to decrypt invitation")
+		return err
+	}
+	if ap.Revoked {
+		return errors.New("access revoked")
 	}
 
-	var invitation Invitation
-	err = json.Unmarshal(invitationBytes, &invitation)
+	FileNameKey, _ := userlib.HashKDF(userdata.MasterKey, []byte(filename))
+	UserKey, err := userlib.HashKDF(userdata.MasterKey, []byte("UserKey"))
+
+	FileInfoUUID, err := uuid.FromBytes(FileNameKey[:16])
 	if err != nil {
 		return err
 	}
 
-	senderVerifyKey, ok := userlib.KeystoreGet(senderUsername + "_verify")
-	if !ok {
-		return errors.New("sender verify key not found")
+	_, ok := userlib.DatastoreGet(FileInfoUUID)
+	if ok {
+		return errors.New("cannot accept invite with a name that already exists")
 	}
 
-	invitationForVerification := Invitation{
-		FileMetadataUUID: invitation.FileMetadataUUID,
-		EncKey:           invitation.EncKey,
-		MacKey:           invitation.MacKey,
-	}
+	var fileinfo FileInfo
+	fileinfo.Owner = false
+	fileinfo.AccessPointUUID = inv.AccessPointUUID
+	fileinfo.EncKey = inv.APEncKey
+	fileinfo.MACKey = inv.APMACKey
+	fileinfo.OwnerAccessInfoMapUUID = uuid.Nil
 
-	invitationBytesForVerification, err := json.Marshal(invitationForVerification)
+	err = setFinalCiph(FileInfoUUID, UserKey[:16], UserKey[16:32], fileinfo)
 	if err != nil {
 		return err
 	}
 
-	err = userlib.DSVerify(senderVerifyKey, invitationBytesForVerification, invitation.Signature)
-	if err != nil {
-		return errors.New("invitation signature verification failed")
-	}
-
-	userData.FileMap[filename] = invitation.FileMetadataUUID
-	return userdata.saveUserData(userData)
+	return nil
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
-	userData, err := userdata.getUserData()
+
+	FileNameKey, _ := userlib.HashKDF(userdata.MasterKey, []byte(filename))
+	UserKey, err := userlib.HashKDF(userdata.MasterKey, []byte("UserKey"))
+
+	FileInfoUUID, err := uuid.FromBytes(FileNameKey[:16])
 	if err != nil {
 		return err
 	}
 
-	metadataUUID, exists := userData.FileMap[filename]
-	if !exists {
-		return errors.New("file not found")
-	}
-
-	metadata, err := userdata.getFileMetadata(filename)
+	var fileinfo FileInfo
+	err = getCiphAndCheckMAC(FileInfoUUID, UserKey[:16], UserKey[16:32], &fileinfo)
 	if err != nil {
 		return err
 	}
 
-	if metadata.Owner != userdata.Username {
-		return errors.New("only file owner can revoke access")
-	}
-
-	content, err := userdata.LoadFile(filename)
+	var accmap OwnerAccessInfoMap
+	err = getCiphAndCheckMAC(fileinfo.OwnerAccessInfoMapUUID, UserKey[:16], UserKey[16:32], &accmap)
 	if err != nil {
 		return err
 	}
 
-	if metadata.AppendHead != uuid.Nil {
-		err = userdata.deleteAppendChain(metadata.AppendHead)
+	info := accmap.InfoMap[recipientUsername]
+	
+	var ap AccessPoint
+	err = getCiphAndCheckMAC(info.AccessPointUUID, info.APEncKey, info.APMACKey, &ap)
+	if err != nil {
+		return err
+	}
+
+	ap.Revoked = true
+	err = setFinalCiph(info.AccessPointUUID, info.APEncKey, info.APMACKey, ap)
+	if err != nil {
+		return err
+	}
+
+	delete(accmap.InfoMap, recipientUsername)
+
+	err = setFinalCiph(fileinfo.OwnerAccessInfoMapUUID, UserKey[:16], UserKey[16:32], accmap)
+	if err != nil {
+		return err
+	}
+
+	newFileHeaderUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
+	if err != nil {
+		return err
+	}
+	newFirstUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
+	if err != nil {
+		return err
+	}
+	newNewUUID, err := uuid.FromBytes(userlib.RandomBytes(16))
+	if err != nil {
+		return err
+	}
+	newEncKey := userlib.RandomBytes(16)
+	newMACKey := userlib.RandomBytes(16)
+
+
+	data, err := userdata.LoadFile(filename)
+
+	var fileheader FileHeader
+	err = getCiphAndCheckMAC(fileinfo.FileHeaderUUID, fileinfo.EncKey, fileinfo.MACKey, &fileheader)
+	if err != nil {
+		return err
+	}
+
+	fileheader.FirstUUID = newFirstUUID
+	fileheader.NewUUID = newNewUUID
+
+	err = setFinalCiph(newFileHeaderUUID, newEncKey, newMACKey, fileheader)
+	if err != nil {
+		return err
+	}
+
+	var file File
+	file.Content = data
+	file.NextUUID = newNewUUID
+
+	err = setFinalCiph(newFirstUUID, newEncKey, newMACKey, file)
+	if err != nil {
+		return err
+	}
+
+	fileinfo.FileHeaderUUID = newFileHeaderUUID
+	fileinfo.EncKey = newEncKey
+	fileinfo.MACKey = newMACKey
+	err = setFinalCiph(FileInfoUUID, UserKey[:16], UserKey[16:32], &fileinfo)
+	if err != nil {
+		return err
+	}
+
+	for _, v := range accmap.InfoMap {
+
+		var ap AccessPoint
+		err = getCiphAndCheckMAC(v.AccessPointUUID, v.APEncKey, v.APMACKey, &ap)
+		if err != nil {
+			return err
+		}
+		ap.FileHeaderUUID = newFileHeaderUUID
+		ap.EncKey = newEncKey
+		ap.MACKey = newMACKey
+
+		err = setFinalCiph(v.AccessPointUUID, v.APEncKey, v.APMACKey, ap)
 		if err != nil {
 			return err
 		}
 	}
 
-	userlib.DatastoreDelete(metadata.FileUUID)
+	return nil
+}
 
-	newFileEncKey := userlib.RandomBytes(16)
-	newFileMacKey := userlib.RandomBytes(64)
 
-	newFileUUID := uuid.New()
-
-	fileData := FileData{
-		Content: content,
+func getCiphAndCheckMAC (uuidLocation uuid.UUID, EncKey []byte, MACKey []byte, object interface{}) (error) {
+	
+	data, ok := userlib.DatastoreGet(uuidLocation)
+	if !ok {
+		return errors.New("getCiphAndCheckMAC: error getting Data")
+	}
+	
+	if len(data) < 64 {
+		return errors.New("getCiphAndCheckMAC: data not long enough")
 	}
 
-	fileDataBytes, err := json.Marshal(fileData)
+	ciphertext := data[:len(data)-64]
+
+	mac, err := userlib.HMACEval(MACKey, ciphertext)
 	if err != nil {
 		return err
 	}
 
-	iv := userlib.RandomBytes(16)
-	encryptedFileData := userlib.SymEnc(newFileEncKey, iv, fileDataBytes)
+	if !userlib.HMACEqual(mac, data[len(data)-64:]) {
+		return errors.New("getCiphAndCheckMAC: HMAC not matching")
+	}
 
-	hmac, err := userlib.HMACEval(newFileMacKey, encryptedFileData)
+	decripted := userlib.SymDec(EncKey, ciphertext)
+
+	err = json.Unmarshal(decripted, object)
 	if err != nil {
 		return err
 	}
 
-	finalFileData := append(encryptedFileData, hmac...)
-	userlib.DatastoreSet(newFileUUID, finalFileData)
+	return nil
+}
 
-	newMetadata := FileMetadata{
-		FileUUID:   newFileUUID,
-		EncKey:     newFileEncKey,
-		MacKey:     newFileMacKey,
-		Owner:      userdata.Username,
-		AppendHead: uuid.Nil,
+
+func setFinalCiph (uuidLocation uuid.UUID, EncKey []byte, MACKey []byte, object interface{}) (error) {
+	
+	bytes, err := json.Marshal(object)
+	if err != nil {
+		return err
+	}
+	
+	ciphertext := userlib.SymEnc(EncKey, userlib.RandomBytes(16), bytes)
+	mac, err := userlib.HMACEval(MACKey, ciphertext)
+	if err != nil {
+		return err
 	}
 
-	err = userdata.saveFileMetadata(metadataUUID, newMetadata)
+	userlib.DatastoreSet(uuidLocation, append(ciphertext, mac...))
+
+	return nil
+}
+func setFinalCiphRSA (uuidLocation uuid.UUID, recieverUsername string, senderSigKey userlib.PrivateKeyType, object interface{}) (error) {
+	
+	bytes, err := json.Marshal(object)
+	if err != nil {
+		return err
+	}
+
+	enckey, ok := userlib.KeystoreGet(recieverUsername + "RSA")
+	if !ok {
+		return errors.New("key not there")
+	}
+
+	symKey := userlib.RandomBytes(16)
+	
+	encriptedKey, err := userlib.PKEEnc(enckey, symKey)
+	if err != nil {
+		return err
+	}
+
+	ciphertext := userlib.SymEnc(symKey, userlib.RandomBytes(16), bytes)
+	if err != nil {
+		return err
+	}
+
+	ciphertext = append(ciphertext, encriptedKey...)
+
+	digsig, err := userlib.DSSign(senderSigKey, ciphertext)
+	
+	if err != nil {
+		return err
+	}
+
+	userlib.DatastoreSet(uuidLocation, append(ciphertext, digsig...))
+
+	return nil
+}
+func getCiphAndCheckMACRSA (uuidLocation uuid.UUID, senderUsername string, recieverPrivateKey userlib.PrivateKeyType, object interface{}) (error) {
+	
+	data, ok := userlib.DatastoreGet(uuidLocation)
+	if !ok {
+		return errors.New("getCiphAndCheckMACRSA: error getting Data")
+	}
+	
+	if len(data) < 512 {
+		return errors.New("getCiphAndCheckMACRSA: data not long enough")
+	}
+
+	ciphertext := data[:len(data)-512]
+
+	verificationKey, ok := userlib.KeystoreGet(senderUsername + "DigSig")
+	if !ok {
+		return errors.New("key not there")
+	}
+	
+	err := userlib.DSVerify(verificationKey, data[:len(data)-256], data[len(data)-256:])
+	if err != nil {
+		return err
+	}
+
+	SymKey, err := userlib.PKEDec(recieverPrivateKey, data[len(data) - 512 :len(data) - 256])
+	if err != nil {
+		return err
+	}
+
+	decripted := userlib.SymDec(SymKey, ciphertext)
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal(decripted, object)
 	if err != nil {
 		return err
 	}
