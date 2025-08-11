@@ -54,7 +54,7 @@ var _ = Describe("Client Tests", func() {
 			Expect(err).To(BeNil())
 		})
 
-		Specify("Store/Load/Append (partial support).", func() {
+		Specify("Store/Load/Append (full support).", func() {
 			alice, _ = client.InitUser("alice", defaultPassword)
 			err = alice.StoreFile(aliceFile, []byte(contentOne))
 			Expect(err).To(BeNil())
@@ -64,7 +64,7 @@ var _ = Describe("Client Tests", func() {
 
 			data, err := alice.LoadFile(aliceFile)
 			Expect(err).To(BeNil())
-			Expect(data).To(Equal([]byte(contentOne)))
+			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
 		})
 
 		Specify("Invitation logic skipped (not implemented).", func() {
